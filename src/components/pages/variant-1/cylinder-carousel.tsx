@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Renderer, Camera, Transform, Texture, Program, Mesh } from 'ogl';
+import { Renderer, Camera, Transform, Texture, Program, Mesh, Vec3 } from 'ogl';
 import gsap from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { CustomEase } from 'gsap/CustomEase';
@@ -31,6 +31,9 @@ if (typeof window !== 'undefined') {
 export function CylinderCarousel() {
   document.title = 'Cinematic Scroll Animations | Codrops | Demo 1';
   const [isLoading, setIsLoading] = useState(true);
+  const [selectedImageIndex, setSelectedImageIndex] = useState<number | null>(null);
+  const [cursorText, setCursorText] = useState<'Scroll' | 'Drag'>('Scroll');
+  const [cursorPos, setCursorPos] = useState({ x: -100, y: -100, visible: false });
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const smoothWrapperRef = useRef<HTMLDivElement>(null);
@@ -45,6 +48,9 @@ export function CylinderCarousel() {
   const lastRotationRef = useRef(0);
   const velocityRef = useRef(0);
   const momentumRef = useRef(0);
+  const isAtScrollEndRef = useRef(false);
+  const dragStateRef = useRef({ isDragging: false, lastX: 0, pointerId: -1, dragDistance: 0 });
+  const dragRotationOffsetRef = useRef(0);
 
   useEffect(() => {
     if (!canvasRef.current || !containerRef.current || !smoothWrapperRef.current || !smoothContentRef.current) return;
@@ -134,6 +140,7 @@ export function CylinderCarousel() {
 
     // Store the initial window width to track horizontal changes
     let lastWidth = window.innerWidth;
+    let detachDragControls: (() => void) | null = null;
 
     const handleResize = () => {
       if (rendererRef.current && cameraRef.current && cylinderRef.current) {
@@ -244,6 +251,27 @@ export function CylinderCarousel() {
               start: 'top top',
               end: 'bottom bottom',
               scrub: 1,
+              onUpdate: (self) => {
+                isAtScrollEndRef.current = self.progress >= 0.995;
+                setCursorText(isAtScrollEndRef.current ? 'Drag' : 'Scroll');
+                if (!dragStateRef.current.isDragging && canvasRef.current) {
+                  canvasRef.current.style.cursor = isAtScrollEndRef.current ? 'grab' : 'default';
+                }
+              },
+              onLeave: () => {
+                isAtScrollEndRef.current = true;
+                setCursorText('Drag');
+                if (!dragStateRef.current.isDragging && canvasRef.current) {
+                  canvasRef.current.style.cursor = 'grab';
+                }
+              },
+              onEnterBack: () => {
+                isAtScrollEndRef.current = false;
+                setCursorText('Scroll');
+                if (!dragStateRef.current.isDragging && canvasRef.current) {
+                  canvasRef.current.style.cursor = 'default';
+                }
+              },
             },
           });
 
@@ -363,6 +391,125 @@ export function CylinderCarousel() {
 
           window.addEventListener('resize', handleResize);
 
+          const getFrontImageIndex = () => {
+            const cylinder = cylinderRef.current;
+            if (!cylinder) return null;
+            const effectiveRotation = cylinder.rotation.y + dragRotationOffsetRef.current;
+            const normalizedU = ((((Math.PI / 2 - effectiveRotation) / (Math.PI * 2)) % 1) + 1) % 1;
+            return Math.floor(normalizedU * images.length) % images.length;
+          };
+
+          const getClosestImageIndexFromPointer = (clientX: number, clientY: number) => {
+            const cylinder = cylinderRef.current;
+            const cameraInstance = cameraRef.current;
+            if (!cylinder || !cameraInstance) return null;
+
+            cameraInstance.updateMatrixWorld();
+            const cameraPos = cameraInstance.worldPosition;
+            const scaleX = cylinder.scale.x || 1;
+            const scaleY = cylinder.scale.y || 1;
+            const scaleZ = cylinder.scale.z || 1;
+            const radiusWorld = cylinderConfig.radius * ((scaleX + scaleZ) * 0.5);
+            const heightWorld = cylinderConfig.height * scaleY;
+            const effectiveRotation = cylinder.rotation.y + dragRotationOffsetRef.current;
+            const sampleOffsetsU = [0.15, 0.5, 0.85];
+            const sampleOffsetsV = [0.2, 0.5, 0.8];
+            let bestIndex: number | null = null;
+            let bestDistance = Number.POSITIVE_INFINITY;
+
+            for (let i = 0; i < images.length; i++) {
+              for (let mapping = 0; mapping < 2; mapping++) {
+                for (const sampleOffsetU of sampleOffsetsU) {
+                  const localAngle = ((i + sampleOffsetU) / images.length) * Math.PI * 2;
+                  const worldAngle = mapping === 0 ? effectiveRotation + localAngle : effectiveRotation - localAngle;
+                  const normal = new Vec3(Math.cos(worldAngle), 0, Math.sin(worldAngle));
+
+                  for (const sampleOffsetV of sampleOffsetsV) {
+                    const y = (sampleOffsetV - 0.5) * heightWorld;
+                    const point = new Vec3(Math.cos(worldAngle) * radiusWorld, y, Math.sin(worldAngle) * radiusWorld);
+                    const toCamera = new Vec3(cameraPos[0] - point[0], cameraPos[1] - point[1], cameraPos[2] - point[2]);
+                    if (normal.dot(toCamera) <= 0) continue;
+
+                    cameraInstance.project(point);
+                    if (point[2] < -1 || point[2] > 1) continue;
+
+                    const sx = (point[0] * 0.5 + 0.5) * window.innerWidth;
+                    const sy = (1 - (point[1] * 0.5 + 0.5)) * window.innerHeight;
+                    const dist = Math.hypot(sx - clientX, sy - clientY);
+                    if (dist < bestDistance) {
+                      bestDistance = dist;
+                      bestIndex = i;
+                    }
+                  }
+                }
+              }
+            }
+
+            return bestIndex ?? getFrontImageIndex();
+          };
+
+          const handlePointerDown = (event: PointerEvent) => {
+            if (!isAtScrollEndRef.current || !cylinderRef.current) return;
+            dragStateRef.current.isDragging = true;
+            dragStateRef.current.lastX = event.clientX;
+            dragStateRef.current.pointerId = event.pointerId;
+            dragStateRef.current.dragDistance = 0;
+            momentumRef.current = 0;
+            document.body.style.cursor = 'grabbing';
+            event.preventDefault();
+          };
+
+          const handlePointerMove = (event: PointerEvent) => {
+            if (!dragStateRef.current.isDragging || dragStateRef.current.pointerId !== event.pointerId) return;
+            const deltaX = event.clientX - dragStateRef.current.lastX;
+            dragStateRef.current.lastX = event.clientX;
+            dragStateRef.current.dragDistance += Math.abs(deltaX);
+
+            const dragRotation = deltaX * 0.01;
+            dragRotationOffsetRef.current += dragRotation;
+            velocityRef.current = dragRotation;
+            momentumRef.current = 0;
+          };
+
+          const handlePointerUp = (event: PointerEvent) => {
+            if (dragStateRef.current.pointerId !== event.pointerId) return;
+            const wasClick = dragStateRef.current.dragDistance < 8;
+            dragStateRef.current.isDragging = false;
+            dragStateRef.current.pointerId = -1;
+            momentumRef.current = 0;
+            document.body.style.cursor = isAtScrollEndRef.current ? 'grab' : 'default';
+
+            if (wasClick && isAtScrollEndRef.current) {
+              const index = getClosestImageIndexFromPointer(event.clientX, event.clientY);
+              if (index !== null) setSelectedImageIndex(index);
+            }
+          };
+
+          window.addEventListener('pointerdown', handlePointerDown);
+          window.addEventListener('pointermove', handlePointerMove);
+          window.addEventListener('pointerup', handlePointerUp);
+          window.addEventListener('pointercancel', handlePointerUp);
+
+          const handleCursorMove = (event: PointerEvent) => {
+            setCursorPos({ x: event.clientX, y: event.clientY, visible: true });
+          };
+          const handleCursorLeave = () => {
+            setCursorPos((prev) => ({ ...prev, visible: false }));
+          };
+
+          window.addEventListener('pointermove', handleCursorMove);
+          window.addEventListener('pointerleave', handleCursorLeave);
+
+          detachDragControls = () => {
+            window.removeEventListener('pointerdown', handlePointerDown);
+            window.removeEventListener('pointermove', handlePointerMove);
+            window.removeEventListener('pointerup', handlePointerUp);
+            window.removeEventListener('pointercancel', handlePointerUp);
+            window.removeEventListener('pointermove', handleCursorMove);
+            window.removeEventListener('pointerleave', handleCursorLeave);
+            document.body.style.cursor = 'default';
+          };
+
           const animate = () => {
             requestAnimationFrame(animate);
 
@@ -370,6 +517,8 @@ export function CylinderCarousel() {
             camera.lookAt([0, 0, 0]);
 
             if (cylinderRef.current) {
+              cylinderRef.current.rotation.y += dragRotationOffsetRef.current;
+              dragRotationOffsetRef.current = 0;
               const currentRotation = cylinderRef.current.rotation.y;
               velocityRef.current = currentRotation - lastRotationRef.current;
               lastRotationRef.current = currentRotation;
@@ -430,6 +579,7 @@ export function CylinderCarousel() {
       window.removeEventListener('resize', handleResize);
       ScrollTrigger.getAll().forEach((trigger) => trigger.kill());
       smoother.kill();
+      detachDragControls?.();
     };
   }, []);
 
@@ -446,17 +596,23 @@ export function CylinderCarousel() {
           { label: 'Demo 2', href: '/variant-2', current: false },
         ]}
         tags={['gsap', 'ogl', 'webgl', 'scroll', '3d']}
-        tagsLink={[
-          'https://tympanus.net/codrops/hub/tag/gsap/',
-          'https://tympanus.net/codrops/hub/tag/ogl/',
-          'https://tympanus.net/codrops/hub/tag/webgl/',
-          'https://tympanus.net/codrops/hub/tag/scroll/',
-          'https://tympanus.net/codrops/hub/tag/3d/',
-        ]}
       />
 
       <div className="fixed inset-0 w-full h-svh z-0">
         <canvas ref={canvasRef} className="w-full h-full" style={{ display: 'block' }} />
+      </div>
+
+      <div
+        className={`fixed z-[80] pointer-events-none px-3 py-1 rounded-full border border-white/30 bg-black/70 text-white text-xs tracking-wider uppercase transition-opacity duration-150 ${
+          cursorPos.visible ? 'opacity-100' : 'opacity-0'
+        }`}
+        style={{
+          left: cursorPos.x + 14,
+          top: cursorPos.y + 14,
+          transform: 'translate3d(0,0,0)',
+        }}
+      >
+        {cursorText}
       </div>
 
       <div className="fixed inset-0 pointer-events-none z-10 text-white">
@@ -496,6 +652,24 @@ export function CylinderCarousel() {
           <div ref={containerRef} style={{ height: '500svh' }} />
         </div>
       </div>
+
+      {selectedImageIndex !== null && (
+        <div className="fixed inset-y-0 right-0 w-[min(92vw,420px)] bg-black/90 border-l border-white/10 z-[70] p-5 text-white">
+          <button
+            type="button"
+            onClick={() => setSelectedImageIndex(null)}
+            className="mb-4 text-sm text-white/70 hover:text-white"
+          >
+            Close
+          </button>
+          <img
+            src={images[selectedImageIndex]}
+            alt={`Selected scene ${selectedImageIndex + 1}`}
+            className="w-full h-auto rounded-md object-cover mb-4"
+          />
+          <p className="text-sm text-white/70">Scene {selectedImageIndex + 1}</p>
+        </div>
+      )}
     </>
   );
 }

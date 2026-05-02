@@ -3,7 +3,6 @@ import { HashRouter as Router, Routes, Route, useLocation } from 'react-router-d
 
 import { useEffect } from 'react';
 import { CylinderCarousel } from './components/pages/variant-1/cylinder-carousel';
-import CinematicSceneShowcase from './components/pages/variant-2/cinematic-scene-showcase';
 
 function ScrollToTop() {
   const { pathname } = useLocation();
@@ -19,12 +18,10 @@ function BodyClassSetter() {
   const location = useLocation();
 
   useEffect(() => {
-    document.body.classList.remove('demo-1', 'demo-2');
+    document.body.classList.remove('demo-1');
 
     if (location.pathname === '/') {
       document.body.classList.add('demo-1');
-    } else if (location.pathname === '/variant-2') {
-      document.body.classList.add('demo-2');
     }
   }, [location.pathname]);
 
@@ -39,7 +36,6 @@ function App() {
       <main id="main-content" className="" role="main">
         <Routes>
           <Route path="/" element={<CylinderCarousel />} />
-          <Route path="/variant-2" element={<CinematicSceneShowcase />} />
         </Routes>
       </main>
     </Router>
